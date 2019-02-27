@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
@@ -58,7 +59,15 @@ func (sc *serviceServingCertUpdateController) addSecret(obj metav1.Object) bool 
 }
 
 func (sc *serviceServingCertUpdateController) updateSecret(old, cur metav1.Object) bool {
-	// if the current doesn't have a service name, check the old
+	curSecret := cur.(*v1.Secret)
+	oldSecret := old.(*v1.Secret)
+	// if new data does not match, add old
+	if !bytes.Equal(curSecret.Data[v1.TLSCertKey], oldSecret.Data[v1.TLSCertKey]) ||
+		!bytes.Equal(curSecret.Data[v1.TLSPrivateKeyKey], oldSecret.Data[v1.TLSPrivateKeyKey]) ||
+		len(curSecret.Data) != 2 {
+		return sc.addSecret(old)
+	}
+	// if the current data does not match or doesn't have a service name, check the old
 	// TODO drop this
 	return sc.addSecret(cur) || sc.addSecret(old)
 }
@@ -111,6 +120,20 @@ func (sc *serviceServingCertUpdateController) requiresRegeneration(secret *v1.Se
 	// if we don't have an ownerref, just go ahead and regenerate.  It's easier than writing a
 	// secondary logic flow.
 	if !ocontroller.HasOwnerRef(secret, ownerRef(sharedService)) {
+		return true, sharedService
+	}
+
+	// regenerate if secret has bad data key
+	// this checks that the right keys are there
+	// the updateSecret checks the values against known good values
+	for k, _ := range secret.Data {
+		if k != v1.TLSCertKey {
+			if k != v1.TLSPrivateKeyKey {
+				return true, sharedService
+			}
+		}
+	}
+	if len(secret.Data) != 2 {
 		return true, sharedService
 	}
 

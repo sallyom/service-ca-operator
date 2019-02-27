@@ -309,9 +309,11 @@ func toRequiredSecret(dnsSuffix string, ca *crypto.CA, service *v1.Service, secr
 	if secretCopy.Annotations == nil {
 		secretCopy.Annotations = map[string]string{}
 	}
-	if secretCopy.Data == nil {
-		secretCopy.Data = map[string][]byte{}
-	}
+	// let garbage collector cleanup map allocation, for simplicity
+	secretCopy.Data = map[string][]byte{
+    v1.TLSCertKey: certBytes,
+    v1.TLSPrivateKeyKey: keyBytes,
+    }
 
 	secretCopy.Annotations[api.AlphaServingCertExpiryAnnotation] = servingCert.Certs[0].NotAfter.Format(time.RFC3339)
 	secretCopy.Annotations[api.ServingCertExpiryAnnotation] = servingCert.Certs[0].NotAfter.Format(time.RFC3339)

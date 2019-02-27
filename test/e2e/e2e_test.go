@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"math/rand"
 	"os"
 	"strings"
@@ -74,6 +75,20 @@ func createServingCertAnnotatedService(client *kubernetes.Clientset, secretName,
 	return err
 }
 
+func createAnnotatedCABundleInjectionConfigMap(client *kubernetes.Clientset, configMapName, namespace string) error {
+	_, err := client.CoreV1().ConfigMaps(namespace).Create(&v1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: configMapName,
+			Annotations: map[string]string{
+				api.AlphaInjectCABundleAnnotationName: "true",
+				api.InjectCABundleAnnotationName: "true",
+			},
+		},
+	})
+	return err
+}
+
 func pollForServiceServingSecret(client *kubernetes.Clientset, secretName, namespace string) error {
 	return wait.PollImmediate(time.Second, 10*time.Second, func() (bool, error) {
 		_, err := client.CoreV1().Secrets(namespace).Get(secretName, metav1.GetOptions{})
@@ -87,9 +102,98 @@ func pollForServiceServingSecret(client *kubernetes.Clientset, secretName, names
 	})
 }
 
+func pollForCABundleInjectionConfigMap(client *kubernetes.Clientset, configMapName, namespace string) error {
+	return wait.PollImmediate(time.Second, 10*time.Second, func() (bool, error) {
+		_, err := client.CoreV1().ConfigMaps(namespace).Get(configMapName, metav1.GetOptions{})
+		if err != nil && errors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+}
+
+func editServiceServingSecretData(client *kubernetes.Clientset, secretName, namespace string) error {
+	sss, err := client.CoreV1().Secrets(namespace).Get(secretName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	scopy := sss.DeepCopy()
+	if len(scopy.Data) != 2 {
+		return fmt.Errorf("service serving secret missing data")
+	}
+	scopy.Data["foo"] = []byte("blah")
+	_, err = client.CoreV1().Secrets(namespace).Update(scopy)
+	if err != nil {
+		return err
+	}
+	time.Sleep(10 * time.Second)
+	return nil
+}
+
+func editConfigMapCABundleInjectionData(client *kubernetes.Clientset, configMapName, namespace string) error {
+	cm, err := client.CoreV1().ConfigMaps(namespace).Get(configMapName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	cmcopy := cm.DeepCopy()
+	if len(cmcopy.Data) != 1 {
+		return fmt.Errorf("ca bundle injection configmap missing data")
+	}
+	cmcopy.Data["foo"] = "blah"
+	_, err = client.CoreV1().ConfigMaps(namespace).Update(cmcopy)
+	if err != nil {
+		return err
+	}
+	time.Sleep(10 * time.Second)
+	return nil
+}
+
+func checkServiceServingSecretData(client *kubernetes.Clientset, secretName, namespace string) error {
+	sss, err := client.CoreV1().Secrets(namespace).Get(secretName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if len(sss.Data) != 2 {
+		return fmt.Errorf("unexpected service serving secret data map length: %v", len(sss.Data))
+	}
+	ok := true
+	_, ok = sss.Data[v1.TLSCertKey]
+	_, ok = sss.Data[v1.TLSPrivateKeyKey]
+	if !ok {
+		return fmt.Errorf("unexpected service serving secret data: %v", sss.Data)
+	}
+	return nil
+}
+
+func checkConfigMapCABundleInjectionData(client *kubernetes.Clientset, configMapName, namespace string) error {
+	cm, err := client.CoreV1().ConfigMaps(namespace).Get(configMapName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if len(cm.Data) != 1 {
+		return fmt.Errorf("unexpected ca bundle injection configmap data map length: %v", len(cm.Data))
+	}
+	ok := true
+	_, ok = cm.Data[api.InjectionDataKey]
+	if !ok {
+		return fmt.Errorf("unexpected ca bundle injection configmap data: %v", cm.Data)
+	}
+	return nil
+}
+
 func cleanupServiceSignerTestObjects(client *kubernetes.Clientset, secretName, serviceName, namespace string) {
 	client.CoreV1().Secrets(namespace).Delete(secretName, &metav1.DeleteOptions{})
 	client.CoreV1().Services(namespace).Delete(serviceName, &metav1.DeleteOptions{})
+	client.CoreV1().Namespaces().Delete(namespace, &metav1.DeleteOptions{})
+	// TODO this should just delete the namespace and wait for it to be gone
+	// it should probably fail the test if the namespace gets stuck
+}
+
+func cleanupConfigMapCABundleInjectionTestObjects(client *kubernetes.Clientset, cmName, namespace string) {
+	client.CoreV1().ConfigMaps(namespace).Delete(cmName, &metav1.DeleteOptions{})
 	client.CoreV1().Namespaces().Delete(namespace, &metav1.DeleteOptions{})
 	// TODO this should just delete the namespace and wait for it to be gone
 	// it should probably fail the test if the namespace gets stuck
@@ -150,10 +254,108 @@ func TestE2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("error fetching created serving cert secret: %v", err)
 		}
+
+		err = checkServiceServingSecretData(adminClient, testSecretName, ns.Name)
+		if err != nil {
+			t.Fatalf("error when checking serving cert secret: %v", err)
+		}
+
+	})
+
+	// test updated data in serving-cert-secret will be stomped on
+	t.Run("serving-cert-secret update", func(t *testing.T) {
+		ns, err := createTestNamespace(adminClient, "test-"+randSeq(5))
+		if err != nil {
+			t.Fatalf("could not create test namespace: %v", err)
+		}
+		testServiceName := "test-service-" + randSeq(5)
+		testSecretName := "test-secret-" + randSeq(5)
+		defer cleanupServiceSignerTestObjects(adminClient, testSecretName, testServiceName, ns.Name)
+		err = createServingCertAnnotatedService(adminClient, testSecretName, testServiceName, ns.Name)
+		if err != nil {
+			t.Fatalf("error creating annotated service: %v", err)
+		}
+		err = pollForServiceServingSecret(adminClient, testSecretName, ns.Name)
+		if err != nil {
+			t.Fatalf("error fetching created serving cert secret: %v", err)
+		}
+		err = checkServiceServingSecretData(adminClient, testSecretName, ns.Name)
+		if err != nil {
+			t.Fatalf("error when checking serving cert secret: %v", err)
+		}
+
+		err = editServiceServingSecretData(adminClient, testSecretName, ns.Name)
+		if err != nil {
+			t.Fatalf("error editing serving cert secret: %v", err)
+		}
+		err = checkServiceServingSecretData(adminClient, testSecretName, ns.Name)
+		if err != nil {
+			t.Fatalf("error when checking serving cert secret: %v", err)
+		}
+	})
+
+	// test ca bundle injection configmap
+	t.Run("ca bundle injection configmap", func(t *testing.T) {
+		ns, err := createTestNamespace(adminClient, "test-"+randSeq(5))
+		if err != nil {
+			t.Fatalf("could not create test namespace: %v", err)
+		}
+		testConfigMapName := "test-configmap-" + randSeq(5)
+		defer cleanupConfigMapCABundleInjectionTestObjects(adminClient, testConfigMapName, ns.Name)
+
+		err = createAnnotatedCABundleInjectionConfigMap(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error creating annotated configmap: %v", err)
+		}
+
+		err = pollForCABundleInjectionConfigMap(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error fetching ca bundle injection configmap: %v", err)
+		}
+
+		err = checkConfigMapCABundleInjectionData(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error when checking ca bundle injection configmap: %v", err)
+		}
+	})
+
+	// test updated data in ca bundle injection configmap will be stomped on
+	t.Run("ca bundle injection configmap update", func(t *testing.T) {
+		ns, err := createTestNamespace(adminClient, "test-"+randSeq(5))
+		if err != nil {
+			t.Fatalf("could not create test namespace: %v", err)
+		}
+		testConfigMapName := "test-configmap-" + randSeq(5)
+		defer cleanupConfigMapCABundleInjectionTestObjects(adminClient, testConfigMapName, ns.Name)
+
+		err = createAnnotatedCABundleInjectionConfigMap(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error creating annotated configmap: %v", err)
+		}
+
+		err = pollForCABundleInjectionConfigMap(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error fetching ca bundle injection configmap: %v", err)
+		}
+
+		err = checkConfigMapCABundleInjectionData(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error when checking ca bundle injection configmap: %v", err)
+		}
+
+		err = editConfigMapCABundleInjectionData(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error editing ca bundle injection configmap: %v", err)
+		}
+
+		err = checkConfigMapCABundleInjectionData(adminClient, testConfigMapName, ns.Name)
+		if err != nil {
+			t.Fatalf("error when checking ca bundle injection configmap: %v", err)
+		}
+
 	})
 
 	// TODO: additional tests
-	// - configmap CA bundle injection
 	// - API service CA bundle injection
 	// - regenerate serving cert
 }

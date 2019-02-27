@@ -98,6 +98,10 @@ func TestRequiresRegenerationServiceUIDMismatch(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{ownerRef(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", UID: types.UID("uid-1")}})},
 				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte("content"),
+					v1.TLSPrivateKeyKey: []byte("morecontent"),
+				},
 			},
 			expected: true,
 		},
@@ -117,6 +121,10 @@ func TestRequiresRegenerationServiceUIDMismatch(t *testing.T) {
 						api.AlphaServingCertExpiryAnnotation: "bad-format",
 					},
 					OwnerReferences: []metav1.OwnerReference{ownerRef(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", UID: types.UID("uid-1")}})},
+				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte("content"),
+					v1.TLSPrivateKeyKey: []byte("morecontent"),
 				},
 			},
 			expected: true,
@@ -138,6 +146,10 @@ func TestRequiresRegenerationServiceUIDMismatch(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{ownerRef(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", UID: types.UID("uid-1")}})},
 				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte("content"),
+					v1.TLSPrivateKeyKey: []byte("morecontent"),
+				},
 			},
 			expected: true,
 		},
@@ -158,8 +170,37 @@ func TestRequiresRegenerationServiceUIDMismatch(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{ownerRef(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", UID: types.UID("uid-1")}})},
 				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte("content"),
+					v1.TLSPrivateKeyKey: []byte("morecontent"),
+				},
 			},
 			expected: false,
+		},
+		{
+			name: "bad data",
+			primeServices: func(serviceCache cache.Indexer) {
+				serviceCache.Add(&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "foo", UID: types.UID("uid-1"), Annotations: map[string]string{api.AlphaServingCertSecretAnnotation: "mysecret"}},
+				})
+			},
+			secret: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "ns1", Name: "mysecret",
+					Annotations: map[string]string{
+						api.AlphaServiceNameAnnotation:       "foo",
+						api.AlphaServiceUIDAnnotation:        "uid-1",
+						api.AlphaServingCertExpiryAnnotation: time.Now().Add(10 * time.Minute).Format(time.RFC3339),
+					},
+					OwnerReferences: []metav1.OwnerReference{ownerRef(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", UID: types.UID("uid-1")}})},
+				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte("content"),
+					v1.TLSPrivateKeyKey: []byte("morecontent"),
+					"badkey":            []byte("baddata"),
+				},
+			},
+			expected: true,
 		},
 		{
 			name: "missing ownerref",
@@ -177,6 +218,10 @@ func TestRequiresRegenerationServiceUIDMismatch(t *testing.T) {
 						api.AlphaServingCertExpiryAnnotation: time.Now().Add(10 * time.Minute).Format(time.RFC3339),
 					},
 					OwnerReferences: []metav1.OwnerReference{ownerRef(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", UID: types.UID("uid-2")}})},
+				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte("content"),
+					v1.TLSPrivateKeyKey: []byte("morecontent"),
 				},
 			},
 			expected: true,
@@ -344,6 +389,10 @@ func TestRequiresRegenerationServiceUIDMismatchBetaAnnotation(t *testing.T) {
 						api.ServingCertExpiryAnnotation: time.Now().Add(10 * time.Minute).Format(time.RFC3339),
 					},
 					OwnerReferences: []metav1.OwnerReference{ownerRef(&v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo", UID: types.UID("uid-1")}})},
+				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte("content"),
+					v1.TLSPrivateKeyKey: []byte("morecontent"),
 				},
 			},
 			expected: false,
