@@ -3,8 +3,6 @@ package operator
 import (
 	"os"
 
-	"github.com/golang/glog"
-	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	appsclientv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
@@ -15,20 +13,18 @@ import (
 	"github.com/openshift/library-go/pkg/operator/status"
 
 	operatorv1 "github.com/openshift/api/operator/v1"
-	operatorv1client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1"
 	operatorv1informers "github.com/openshift/client-go/operator/informers/externalversions/operator/v1"
+	"github.com/openshift/library-go/pkg/operator/v1helpers"
 	"github.com/openshift/service-ca-operator/pkg/boilerplate/operator"
 	"github.com/openshift/service-ca-operator/pkg/controller/api"
 	"github.com/openshift/service-ca-operator/pkg/operator/operatorclient"
 )
 
 type serviceCAOperator struct {
-	operatorConfigClient   operatorv1client.ServiceCAsGetter
-	operatorConfigInformer operatorv1informers.ServiceCAInformer
-
-	appsv1Client appsclientv1.AppsV1Interface
-	corev1Client coreclientv1.CoreV1Interface
-	rbacv1Client rbacclientv1.RbacV1Interface
+	operatorClient *operatorclient.OperatorClient
+	appsv1Client   appsclientv1.AppsV1Interface
+	corev1Client   coreclientv1.CoreV1Interface
+	rbacv1Client   rbacclientv1.RbacV1Interface
 
 	versionGetter status.VersionGetter
 	eventRecorder events.Recorder
@@ -36,8 +32,8 @@ type serviceCAOperator struct {
 
 func NewServiceCAOperator(
 	operatorConfigInformer operatorv1informers.ServiceCAInformer,
+	operatorClient *operatorclient.OperatorClient,
 	namespacedKubeInformers informers.SharedInformerFactory,
-	operatorConfigClient operatorv1client.ServiceCAsGetter,
 	appsv1Client appsclientv1.AppsV1Interface,
 	corev1Client coreclientv1.CoreV1Interface,
 	rbacv1Client rbacclientv1.RbacV1Interface,
@@ -45,14 +41,13 @@ func NewServiceCAOperator(
 	eventRecorder events.Recorder,
 ) operator.Runner {
 	c := &serviceCAOperator{
-		operatorConfigClient: operatorConfigClient,
+		operatorClient: operatorClient,
+		appsv1Client:   appsv1Client,
+		corev1Client:   corev1Client,
+		rbacv1Client:   rbacv1Client,
 
-		appsv1Client: appsv1Client,
-		corev1Client: corev1Client,
-		rbacv1Client: rbacv1Client,
-
-		eventRecorder: eventRecorder,
 		versionGetter: versionGetter,
+		eventRecorder: eventRecorder,
 	}
 
 	configEvents := operator.FilterByNames(api.OperatorConfigInstanceName)
@@ -84,11 +79,12 @@ func NewServiceCAOperator(
 		operator.WithInformer(namespacedKubeInformers.Core().V1().Secrets(), secretEvents),
 		operator.WithInformer(namespacedKubeInformers.Apps().V1().Deployments(), deploymentEvents),
 		operator.WithInformer(namespacedKubeInformers.Core().V1().Namespaces(), namespaceEvents),
+		operator.WithInformer(operatorClient.Informers.Operator().V1().ServiceCAs(), configEvents),
 	)
 }
 
 func (c serviceCAOperator) Key() (metav1.Object, error) {
-	return c.operatorConfigClient.ServiceCAs().Get(api.OperatorConfigInstanceName, metav1.GetOptions{})
+	return c.operatorClient.Client.ServiceCAs().Get(api.OperatorConfigInstanceName, metav1.GetOptions{})
 }
 
 func (c serviceCAOperator) Sync(obj metav1.Object) error {
@@ -104,28 +100,26 @@ func (c serviceCAOperator) Sync(obj metav1.Object) error {
 		// This is to push out deployments but does not handle deployment generation like it used to. It may need tweaking.
 		err := syncControllers(c, operatorConfigCopy)
 		if err != nil {
-			c.setFailingStatus(operatorConfigCopy, "OperatorSyncLoopError", err.Error())
+			c.setFailingTrue(operatorConfigCopy, "OperatorSyncLoopError", err.Error())
 		} else {
+			c.setFailingFalse(operatorConfigCopy, "OperatorSyncLoopComplete")
 			setOperatorVersion, err = c.syncStatus(operatorConfigCopy, deploymentNames)
 			if err != nil {
 				return err
 			}
 		}
 		if setOperatorVersion {
-			version := os.Getenv("OPERATOR_IMAGE_VERSION")
+			version := os.Getenv(operatorVersionEnvName)
 			if c.versionGetter.GetVersions()["operator"] != version {
-				glog.Infof("Updating clusteroperator %s version: %v", clusterOperatorName, version)
 				// Set current version
 				c.versionGetter.SetVersion("operator", version)
 			}
 		}
 	}
-	// update status to be available, progressing or failing
-	if !equality.Semantic.DeepEqual(operatorConfig, operatorConfigCopy) {
-		if _, err := c.operatorConfigClient.ServiceCAs().UpdateStatus(operatorConfigCopy); err != nil {
-			return err
-		}
-	}
+	v1helpers.UpdateStatus(c.operatorClient, func(status *operatorv1.OperatorStatus) error {
+		operatorConfigCopy.Status.OperatorStatus.DeepCopyInto(status)
+		return nil
+	})
 	return nil
 }
 
